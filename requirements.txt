@@ -1,0 +1,12 @@
+paddleocr==3.6.0
+paddlepaddle==3.3.1
+paddlex==3.6.1
+PyQt6==6.11.0
+PyQt6-Qt6==6.11.1
+PyQt6_sip==13.11.1
+mss==10.2.0
+keyboard==0.13.5
+numpy==2.3.5
+Pillow==12.2.0
+pyinstaller>=6.0
+deep-translator>=1.11.4
