@@ -1,4 +1,7 @@
-<p align="center">
+![License](https://img.shields.io/badge/license-MIT-green)
+![Python](https://img.shields.io/badge/python-3.10+-blue)
+![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
+<p align="center"> 
   <img src="assets/logo.png" width="128">
 </p>
 
