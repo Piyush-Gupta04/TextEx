@@ -179,3 +179,23 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+# Logs
+build_debug.txt
+build_output.txt
+build_output2.txt
+build_output3.txt
+crash_output.txt
+stderr_out.txt
+stdout_out.txt
+
+# Screenshots
+captures/
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Build output
+build/
+dist/
