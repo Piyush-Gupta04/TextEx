@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import logging
 import time
+import traceback
 from typing import Callable, Optional
 
 import numpy as np
@@ -153,11 +154,11 @@ class AutoOCRService:
 
             if engine is not None:
                 self._engines[code] = engine
-                print(f"[AutoOCR] ✔ {name} ({code}) loaded  [{idx}/{total}]")
+                print(f"[AutoOCR] [OK]  {name} ({code}) loaded  [{idx}/{total}]")
                 logger.info("[AutoOCR] Engine '%s' loaded [%d/%d].", code, idx, total)
             else:
                 self._failed[code] = error or "unknown error"
-                print(f"[AutoOCR] ✘ {name} ({code}) failed  [{idx}/{total}]: {error}")
+                print(f"[AutoOCR] [FAIL] {name} ({code}) failed  [{idx}/{total}]: {error}")
                 logger.warning("[AutoOCR] Engine '%s' failed: %s", code, error)
 
             if on_progress:
@@ -295,7 +296,17 @@ class AutoOCRService:
             engine = PaddleOCR(**kwargs)
             return engine, None
         except Exception as exc:
-            return None, str(exc)
+            tb = traceback.format_exc()
+            logger.error(
+                "[AutoOCR] Engine '%s' (%s) FAILED with full traceback:\n%s",
+                code, name, tb,
+            )
+            # Also print to stdout so it appears in any console/debug log
+            print(
+                f"[AutoOCR] ENGINE LOAD FAILURE — lang='{code}' ({name})\n{tb}",
+                flush=True,
+            )
+            return None, f"{type(exc).__name__}: {exc}"
 
     # ──────────────────────────────────────────────────────────────────────
     # Internal — per-region inference

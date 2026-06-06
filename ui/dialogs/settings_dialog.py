@@ -366,10 +366,12 @@ class SettingsDialog(QDialog):
         self._autohide_combo = QComboBox()
         self._autohide_combo.setObjectName("AutohideCombo")
         for label, secs in [
-            ("5 seconds", 5),
+            ("Disabled",   0),
+            ("3 seconds",  3),
+            ("5 seconds",  5),
             ("10 seconds", 10),
+            ("15 seconds", 15),
             ("30 seconds", 30),
-            ("Never", 0),
         ]:
             self._autohide_combo.addItem(label, secs)
         # Select current value

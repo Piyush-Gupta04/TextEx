@@ -34,8 +34,9 @@ Thread safety:
 from __future__ import annotations
 
 import logging
+import traceback
 
-from PyQt6.QtCore import QObject, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QObject, QThread, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from core.history import HistoryManager
@@ -84,23 +85,36 @@ class _AutoOCRLoaderWorker(QThread):
         self._min_confidence = min_confidence
 
     def run(self) -> None:
-        service = AutoOCRService(min_confidence=self._min_confidence)
+        try:
+            service = AutoOCRService(min_confidence=self._min_confidence)
 
-        def _on_progress(loaded: int, total: int, code: str, error: str | None):
-            if error is None:
-                self.engine_ready.emit(code, loaded, total)
+            def _on_progress(loaded: int, total: int, code: str, error: str | None):
+                if error is None:
+                    self.engine_ready.emit(code, loaded, total)
+                else:
+                    self.engine_failed.emit(code, error, loaded, total)
+
+            service.load_all(on_progress=_on_progress)
+
+            if not service.is_loaded:
+                self.load_error.emit(
+                    "No OCR language engines could be loaded.  "
+                    "Check that PaddleOCR is installed correctly."
+                )
             else:
-                self.engine_failed.emit(code, error, loaded, total)
+                self.load_complete.emit(service)
 
-        service.load_all(on_progress=_on_progress)
-
-        if not service.is_loaded:
-            self.load_error.emit(
-                "No OCR language engines could be loaded.  "
-                "Check that PaddleOCR is installed correctly."
+        except Exception:
+            tb = traceback.format_exc()
+            logger.error(
+                "[App] _AutoOCRLoaderWorker.run() crashed with unhandled exception:\n%s",
+                tb,
             )
-        else:
-            self.load_complete.emit(service)
+            print(f"[App] LOADER THREAD CRASH:\n{tb}", flush=True)
+            self.load_error.emit(
+                f"OCR loader thread crashed unexpectedly.\n\n"
+                f"See log for full traceback:\n{tb[:500]}"
+            )
 
 
 class _OCRWorker(QThread):
@@ -405,6 +419,10 @@ class Application:
         self._ocr_worker.error_occurred.connect(self._on_ocr_error)
         self._ocr_worker.start()
 
+        # Phase 6.5 — show overlay immediately with loading placeholder
+        if self._settings.show_result_overlay:
+            self._show_loading_overlay()
+
     def _on_ocr_result(self, text: str, duration: float) -> None:
         if not text.strip():
             self.main_window.set_status("No text detected in the selected region")
@@ -436,19 +454,30 @@ class Application:
         self._history.add(text, language="auto", duration=duration)
         logger.info("[App] OCR done: %d words, %.2fs.", words, duration)
 
-        # Auto-translate or show overlay immediately (OCR-only)
+        # Auto-translate or update overlay with real OCR text
         if self._settings.auto_translate:
             lang_name = self._settings.translation_target_lang or DEFAULT_TARGET_LANG
             lang_code = get_language_code(lang_name)
+            # Phase 6.5: if overlay already visible from loading state, update it
+            # with OCR text now; translation result will update it again when done
+            if self._settings.show_result_overlay and self._result_overlay is not None:
+                self._update_loading_overlay(ocr_text=text, translation_text="")
             self._start_translation(text, lang_code, show_overlay_after=True)
         else:
-            # No translation — show overlay now with OCR result only
+            # No translation — show overlay with OCR result
             if self._settings.show_result_overlay:
                 self._show_result_overlay(ocr_text=text, translation_text="")
 
     def _on_ocr_error(self, message: str) -> None:
         self.main_window.set_status(f"OCR error: {message}")
         logger.error("[App] OCR error: %s", message)
+        # Phase 6.5: update loading overlay to show error instead of leaving
+        # it frozen on "Recognizing text…"
+        if self._settings.show_result_overlay and self._result_overlay is not None:
+            self._update_loading_overlay(
+                ocr_text=f"[OCR Error]\n\n{message}",
+                translation_text="",
+            )
         QMessageBox.warning(
             self.main_window, "OCR Failed",
             f"Text extraction failed:\n\n{message}\n\n"
@@ -536,49 +565,118 @@ class Application:
     # ──────────────────────────────────────────────────────────────────────
 
     def _get_result_overlay(self) -> ResultOverlay:
-        """Return existing overlay widget, creating it on first call."""
+        """
+        Return the single persistent ResultOverlay, creating it on first call.
+        All signals are connected exactly once here — no duplicates (BUG 4).
+        """
         if self._result_overlay is None:
-            self._result_overlay = ResultOverlay()
-            self._result_overlay.open_main_window_requested.connect(
-                self._on_overlay_open_main
-            )
-            self._result_overlay.copy_ocr_requested.connect(
-                self._on_overlay_copy_ocr
-            )
-            self._result_overlay.copy_translation_requested.connect(
-                self._on_overlay_copy_translation
-            )
+            ov = ResultOverlay()
+            ov.open_main_window_requested.connect(self._on_overlay_open_main)
+            ov.copy_ocr_requested.connect(self._on_overlay_copy_ocr)
+            ov.copy_translation_requested.connect(self._on_overlay_copy_translation)
+            # BUG 2: wire translation controls inside overlay
+            ov.translate_requested.connect(self._on_overlay_translate)
+            ov.auto_translate_toggled.connect(self._on_overlay_auto_trans_toggled)
+            # UX improvement: autohide combo inside overlay
+            ov.autohide_changed.connect(self._on_overlay_autohide_changed)
+            # Populate language list and sync auto-translate state
+            lang_name = self._settings.translation_target_lang or DEFAULT_TARGET_LANG
+            ov.set_languages(list(SUPPORTED_LANGUAGES.keys()), lang_name)
+            ov.set_auto_translate(self._settings.auto_translate)
+            ov.set_autohide_value(self._settings.overlay_autohide_secs)
+            self._result_overlay = ov
         return self._result_overlay
 
     def _show_result_overlay(self, ocr_text: str, translation_text: str) -> None:
         """
         Populate and display the result overlay near the last capture region.
-        Safe to call from any Qt slot (main thread).
+        Uses update_content() for atomic state replacement (BUG 4).
+
+        Called when the full result (OCR + optional translation) is ready.
+        Also called by _start_translation closures when auto-translate finishes.
         """
         overlay = self._get_result_overlay()
-        overlay.set_ocr_text(ocr_text)
-        overlay.set_translation_text(translation_text)
+        # Sync language and auto-translate on every show
+        lang_name = self._settings.translation_target_lang or DEFAULT_TARGET_LANG
+        overlay.set_languages(list(SUPPORTED_LANGUAGES.keys()), lang_name)
+        overlay.set_auto_translate(self._settings.auto_translate)
+        overlay.set_translate_busy(False)
+        # Sync autohide combo with persisted setting (without triggering the slot)
+        overlay.set_autohide_value(self._settings.overlay_autohide_secs)
+
+        # Atomic content update — no partial state
+        overlay.update_content(ocr_text, translation_text)
 
         rx, ry, rw, rh = self._last_capture_region
         overlay.position_near_region(rx, ry, rw, rh)
-
         overlay.show()
-
-        secs = self._settings.overlay_autohide_secs
-        overlay.start_autohide(secs)
+        overlay.start_autohide(self._settings.overlay_autohide_secs)
 
         logger.debug(
             "[App] ResultOverlay shown near (%d,%d,%d,%d), autohide=%ds",
-            rx, ry, rw, rh, secs,
+            rx, ry, rw, rh, self._settings.overlay_autohide_secs,
         )
 
-    # ── Overlay action slots ───────────────────────────────────────────────
+    # ── Phase 6.5 — Instant Feedback helpers ─────────────────────────────
+
+    def _show_loading_overlay(self) -> None:
+        """
+        Phase 6.5 — show the overlay immediately after capture, before OCR.
+
+        The overlay appears near the captured region displaying a
+        "Recognizing text…" placeholder.  The auto-hide countdown is NOT
+        started here — it begins only once real OCR content arrives via
+        _update_loading_overlay(), so the overlay never times out mid-recognition.
+        """
+        overlay = self._get_result_overlay()
+        lang_name = self._settings.translation_target_lang or DEFAULT_TARGET_LANG
+        overlay.set_languages(list(SUPPORTED_LANGUAGES.keys()), lang_name)
+        overlay.set_auto_translate(self._settings.auto_translate)
+        overlay.set_autohide_value(self._settings.overlay_autohide_secs)
+
+        # Enter loading state — clears OCR text, shows spinner label
+        overlay.show_loading_state()
+
+        rx, ry, rw, rh = self._last_capture_region
+        overlay.position_near_region(rx, ry, rw, rh)
+        overlay.show()
+        # Auto-hide countdown begins only when real OCR content arrives
+        # (_update_loading_overlay calls the timer — never called here).
+        logger.debug("[App] Loading overlay shown near (%d,%d,%d,%d)", rx, ry, rw, rh)
+
+    def _update_loading_overlay(self, ocr_text: str, translation_text: str) -> None:
+        """
+        Phase 6.5 — update the loading overlay with real OCR content.
+
+        Called from _on_ocr_result() once OCR finishes.  If the overlay is
+        already visible (from _show_loading_overlay) its content is replaced
+        atomically.  If for any reason it is not visible, falls back to the
+        standard _show_result_overlay() path.
+
+        Auto-hide is started here for the first time with real content.
+        """
+        overlay = self._get_result_overlay()
+        if not overlay.isVisible():
+            # Fallback: overlay was closed by user during recognition
+            self._show_result_overlay(ocr_text, translation_text)
+            return
+
+        # Keep overlay in place — no repositioning, no flicker
+        overlay.set_translate_busy(False)
+        overlay.update_content(ocr_text, translation_text)
+        # Now start the countdown — real content is visible
+        overlay.start_autohide(self._settings.overlay_autohide_secs)
+        logger.debug("[App] Loading overlay updated with OCR result (%d chars)", len(ocr_text))
+
+    # ── Overlay action slots ─────────────────────────────────────────────
 
     def _on_overlay_open_main(self) -> None:
-        """Bring the main window to the front from the overlay."""
+        """Bring main window to front — BUG 1 fix: proper PyQt6 enum usage."""
         win = self.main_window
         win.show()
-        win.setWindowState(win.windowState() & ~0x00000001)  # clear minimised
+        state = win.windowState()
+        state &= ~Qt.WindowState.WindowMinimized
+        win.setWindowState(state)
         win.raise_()
         win.activateWindow()
 
@@ -591,11 +689,80 @@ class Application:
     def _on_overlay_copy_translation(self) -> None:
         if self._result_overlay is not None:
             text = self._result_overlay.get_translation_text()
-            if text:
+            if text and not text.startswith("[Translation Error]"):
                 ClipboardService.copy(text)
                 self.main_window.set_status(
                     "Translation copied from overlay", timeout_ms=3000
                 )
+
+    def _on_overlay_translate(self, ocr_text: str, lang_code: str) -> None:
+        """
+        BUG 2: Translate button inside the overlay was clicked.
+        Runs translation worker and feeds result back to the overlay.
+        """
+        # Cancel any running translation first
+        if self._translation_worker is not None:
+            try:
+                if self._translation_worker.isRunning():
+                    self._translation_worker.requestInterruption()
+                    self._translation_worker.quit()
+                    self._translation_worker.wait(2000)
+                self._translation_worker.result_ready.disconnect()
+                self._translation_worker.error_occurred.disconnect()
+            except RuntimeError:
+                pass
+            self._translation_worker = None
+
+        worker = self.translation_service.create_worker(ocr_text, lang_code)
+        overlay = self._result_overlay   # local ref for closure safety
+
+        def _on_result(translated: str, detected: str) -> None:
+            if overlay is not None and not overlay.isHidden():
+                overlay.set_translation_result(translated)
+            # Also update main window
+            self.main_window.set_translation_text(translated)
+            self.main_window.set_detected_lang(detected)
+            self.main_window.set_translation_status("✓  Done")
+            self.main_window.set_translate_button_enabled(True)
+            self._translation_worker = None
+
+        def _on_error(message: str) -> None:
+            if overlay is not None and not overlay.isHidden():
+                overlay.set_translation_result(f"[Translation Error]\n{message}")
+            self.main_window.set_translation_status("⚠  Error")
+            self.main_window.set_translate_button_enabled(True)
+            self._translation_worker = None
+
+        worker.result_ready.connect(_on_result)
+        worker.error_occurred.connect(_on_error)
+        self._translation_worker = worker
+        worker.start()
+        logger.info("[App] Overlay translation started → lang_code=%s", lang_code)
+
+    def _on_overlay_auto_trans_toggled(self, enabled: bool) -> None:
+        """BUG 2: Auto Translate toggled from inside the overlay — keep everything in sync."""
+        self.set_auto_translate(enabled)
+
+    def _on_overlay_autohide_changed(self, seconds: int) -> None:
+        """
+        User changed the autohide combo directly inside the overlay.
+
+        Actions:
+          1. Persist the new value to Settings immediately.
+          2. Call set_autohide_value() on the overlay (blockSignals) so the
+             combo reflects the canonical stored value — guards against any
+             rounding or mismatch.
+
+        Note: start_autohide() is NOT called here because the overlay's own
+        _on_autohide_combo_changed() already restarted the timer inline.
+        """
+        self._settings.overlay_autohide_secs = seconds
+        self._settings.sync()
+        # Confirm combo state without re-emitting the signal
+        if self._result_overlay is not None:
+            self._result_overlay.set_autohide_value(seconds)
+        logger.info("[App] Overlay autohide persisted: %d s", seconds)
+
 
     # ──────────────────────────────────────────────────────────────────────
     # Toolbar / Menu Slots — OCR

@@ -32,11 +32,11 @@ from typing import Optional
 
 import pathlib as _pathlib
 
-# Always resolve the database path relative to this source file, not CWD.
-# Without this, the DB ends up in whichever directory the user ran the app
-# from, which can differ between terminal launches and double-click launches.
-_PROJECT_ROOT = _pathlib.Path(__file__).resolve().parent.parent
-DB_PATH = str(_PROJECT_ROOT / "database" / "history.db")
+# Phase 10: user-data always lives in %APPDATA%\TextEx\ so the packaged app
+# can write to it when installed under Program Files (which is read-only).
+from textex_packaging.paths import get_db_path as _get_db_path
+
+DB_PATH = _get_db_path()
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS history (

@@ -26,6 +26,7 @@ DPI awareness:
 import os
 import sys
 import logging
+from logging.handlers import RotatingFileHandler
 
 # ── Ensure the project root is always on sys.path ─────────────────────────
 # This allows `python main.py` to work regardless of the shell's CWD.
@@ -33,12 +34,29 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-# ── Configure logging before any module import ────────────────────────────
+# ── Set up logging BEFORE any heavy imports ───────────────────────────────
+# Phase 10: always write to %APPDATA%\TextEx\logs\textex.log so errors are
+# visible even in the packaged (no-console) executable.
+from textex_packaging.paths import ensure_dirs, get_log_path  # noqa: E402
+ensure_dirs()                                           # create dirs if needed
+
+_log_fmt = "%(asctime)s  %(levelname)-8s  %(name)s: %(message)s"
+_log_date = "%H:%M:%S"
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
+    format=_log_fmt,
+    datefmt=_log_date,
 )
+
+# Rotating file handler: 5 MB × 3 backup files
+_fh = RotatingFileHandler(
+    get_log_path(), maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+)
+_fh.setLevel(logging.INFO)
+_fh.setFormatter(logging.Formatter(_log_fmt, datefmt=_log_date))
+logging.getLogger().addHandler(_fh)
+
 # Suppress PaddleOCR/PaddlePaddle/PaddleX noise
 for _noisy in ("ppocr", "paddle", "PaddleOCR", "ppdet",
                "ppocrlite", "paddlex", "root"):

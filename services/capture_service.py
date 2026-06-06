@@ -23,7 +23,11 @@ from PIL import Image
 
 import pathlib as _pathlib
 
-_PROJECT_ROOT = _pathlib.Path(__file__).resolve().parent.parent
+# Phase 10: captures always live in %APPDATA%\TextEx\captures\ so the
+# packaged app can write them when installed under Program Files.
+from textex_packaging.paths import get_captures_dir as _get_captures_dir
+
+_CAPTURE_DIR = _get_captures_dir()
 
 
 class CaptureService:
@@ -35,8 +39,8 @@ class CaptureService:
     An additional captures/debug.png (latest capture) is always written.
     """
 
-    CAPTURE_DIR = str(_PROJECT_ROOT / "captures")
-    DEBUG_PATH  = str(_PROJECT_ROOT / "captures" / "debug.png")
+    CAPTURE_DIR = _CAPTURE_DIR
+    DEBUG_PATH  = os.path.join(_CAPTURE_DIR, "debug.png")
 
     # ──────────────────────────────────────────────────────────────────────
     # Public API
