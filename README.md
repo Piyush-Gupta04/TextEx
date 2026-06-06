@@ -1,3 +1,8 @@
+<p align="center">
+  <img src="assets/logo.png" width="128">
+</p>
+
+<h1 align="center">TextEx</h1>
 # TextEx
 
 TextEx is a Windows desktop application that extracts text directly from the screen and translates it instantly.
