@@ -203,4 +203,18 @@ dist/
 *.exe
 installer/*.exe 
 
-installer/TextEx-Setup-*.exe  
+installer/TextEx-Setup-*.exe
+
+# Runtime files
+captures/
+logs/
+database/history.db
+
+# Debug output
+build_debug.txt
+build_output.txt
+build_output2.txt
+build_output3.txt
+crash_output.txt
+stderr_out.txt
+stdout_out.txt
